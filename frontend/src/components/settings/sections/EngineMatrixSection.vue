@@ -1,390 +1,415 @@
 <template>
-  <div class="em">
-    <header class="em-head">
-      <div class="em-head-copy">
-        <h4>模型引擎</h4>
-        <p>多角色端点配置；统一或独立 API Key。保存后立即切换路由通道。</p>
+  <div class="engine-settings">
+    <!-- 顶部标题区 -->
+    <header class="es-header">
+      <div class="es-header-info">
+        <h4>⚡ 模型引擎</h4>
+        <p>选择 AI 厂商并配置密钥，保存后立即生效。</p>
       </div>
-      <n-button type="primary" size="small" :loading="saving" @click="handleSave">保存配置</n-button>
+      <n-space>
+        <n-button :loading="testing" @click="handleTest">
+          🔌 测试连接
+        </n-button>
+        <n-button type="primary" :loading="saving" @click="handleSave">
+          💾 保存配置
+        </n-button>
+      </n-space>
     </header>
 
-    <section class="em-mode" :class="{ 'em-mode--unified': isUnifiedMode }">
-      <div class="em-mode-copy">
-        <span class="em-mode-badge">{{ isUnifiedMode ? '统一端点' : '独立端点' }}</span>
-        <p v-if="isUnifiedMode">所有场景共用一组 Base URL、API Key 与模型 ID。</p>
-        <p v-else>主力 / 经济 / 知识图谱可分别配置端点与密钥。</p>
+    <!-- 连接状态指示 -->
+    <n-alert
+      v-if="connectionStatus !== 'idle'"
+      :type="connectionStatus === 'ok' ? 'success' : connectionStatus === 'error' ? 'error' : 'info'"
+      :title="connectionStatus === 'ok' ? '✅ 连接正常' : connectionStatus === 'error' ? '❌ 连接失败' : '⏳ 测试中...'"
+      closable
+      @close="connectionStatus = 'idle'"
+      style="margin-bottom: 16px"
+    >
+      {{ connectionMessage }}
+    </n-alert>
+
+    <!-- 厂商预设卡片网格 -->
+    <section class="es-section">
+      <div class="es-section-title">选择厂商</div>
+      <div class="preset-grid">
+        <div
+          v-for="preset in presets"
+          :key="preset.key"
+          class="preset-card"
+          :class="{
+            active: selectedPreset === preset.key,
+            domestic: preset.tags?.includes('domestic'),
+          }"
+          @click="selectPreset(preset)"
+        >
+          <div class="preset-icon">{{ preset.icon }}</div>
+          <div class="preset-name">{{ preset.label }}</div>
+          <div class="preset-tags">
+            <span v-if="preset.recommended" class="preset-badge recommend">推荐</span>
+            <span v-if="preset.tags?.includes('domestic')" class="preset-badge domestic">国内</span>
+            <span v-if="preset.tags?.includes('free')" class="preset-badge free">免费</span>
+          </div>
+        </div>
       </div>
-      <n-switch v-model:value="isUnifiedMode" size="medium">
-        <template #checked>统一</template>
-        <template #unchecked>独立</template>
-      </n-switch>
     </section>
 
-    <div v-if="!isUnifiedMode" class="em-role-tabs">
-      <button
-        v-for="tab in independentTabs"
-        :key="tab.key"
-        type="button"
-        class="em-role-tab"
-        :class="{ active: activeRole === tab.key }"
-        @click="activeRole = tab.key"
-      >
-        <strong>{{ tab.label }}</strong>
-        <span>{{ tab.hint }}</span>
-      </button>
-    </div>
+    <!-- 配置表单 -->
+    <section class="es-section" v-if="selectedPreset">
+      <div class="es-section-title">
+        配置 {{ selectedPresetInfo?.label }}
+        <n-tag v-if="selectedPresetInfo?.protocol" size="small" type="info" style="margin-left: 8px">
+          {{ selectedPresetInfo?.protocol }}
+        </n-tag>
+      </div>
 
-    <div class="em-body">
-      <article
-        v-show="isUnifiedMode || activeRole === 'main'"
-        class="em-role-card em-role-card--main"
-      >
-        <div class="em-role-head">
-          <span class="em-role-title">主力模型</span>
-          <span class="em-role-tag">写作 · 分析 · 规划</span>
-        </div>
-        <endpoint-grid
-          v-model:provider="formData.default_model_provider"
-          v-model:api-key="formData.default_model_api_key"
-          v-model:base-url="formData.default_model_base_url"
-          v-model:model="formData.default_model"
-          base-url-placeholder="例如 https://api.openai.com/v1 或兼容网关"
-          model-placeholder="网关文档中的主模型 ID"
-        />
-        <inference-collapse
-          v-model:temperature="formData.default_temperature"
-          v-model:max-tokens="formData.default_max_tokens"
-          v-model:timeout-seconds="formData.default_timeout_seconds"
-        />
-      </article>
+      <n-form label-placement="left" label-width="100" class="es-form">
+        <!-- API Key -->
+        <n-form-item label="API Key">
+          <n-input
+            v-model:value="formData.api_key"
+            type="password"
+            show-password-on="click"
+            placeholder="输入你的 API Key"
+            size="large"
+          >
+            <template #prefix>🔑</template>
+          </n-input>
+        </n-form-item>
 
-      <article
-        v-show="!isUnifiedMode && activeRole === 'cheap'"
-        class="em-role-card em-role-card--cheap"
-      >
-        <div class="em-role-head">
-          <span class="em-role-title">经济模型</span>
-          <span class="em-role-tag">批量 · 嵌入</span>
-        </div>
-        <endpoint-grid
-          v-model:provider="formData.cheap_model_provider"
-          v-model:api-key="formData.cheap_model_api_key"
-          v-model:base-url="formData.cheap_model_base_url"
-          v-model:model="formData.cheap_model"
-          base-url-placeholder="留空则跟随主力模型"
-          model-placeholder="轻量 / 低成本模型 ID"
-        />
-        <inference-collapse
-          v-model:temperature="formData.cheap_temperature"
-          v-model:max-tokens="formData.cheap_max_tokens"
-          v-model:timeout-seconds="formData.cheap_timeout_seconds"
-        />
-      </article>
+        <!-- Base URL -->
+        <n-form-item label="Base URL">
+          <n-input
+            v-model:value="formData.base_url"
+            :placeholder="selectedPresetInfo?.default_base_url || 'https://api.example.com/v1'"
+            size="large"
+          >
+            <template #prefix>🌐</template>
+          </n-input>
+        </n-form-item>
 
-      <article
-        v-show="!isUnifiedMode && activeRole === 'kg'"
-        class="em-role-card em-role-card--kg"
-      >
-        <div class="em-role-head">
-          <span class="em-role-title">知识图谱</span>
-          <span class="em-role-tag">三元组抽取</span>
-        </div>
-        <endpoint-grid
-          v-model:provider="formData.knowledge_model_provider"
-          v-model:api-key="formData.knowledge_model_api_key"
-          v-model:base-url="formData.knowledge_model_base_url"
-          v-model:model="formData.knowledge_model"
-          base-url-placeholder="留空则跟随主力模型"
-          model-placeholder="需较强指令遵循与结构化输出"
-        />
-        <inference-collapse
-          v-model:temperature="formData.knowledge_temperature"
-          v-model:max-tokens="formData.knowledge_max_tokens"
-          v-model:timeout-seconds="formData.knowledge_timeout_seconds"
-        />
-      </article>
-    </div>
+        <!-- 模型 ID -->
+        <n-form-item label="模型">
+          <n-auto-complete
+            v-model:value="formData.model"
+            :options="modelSuggestions"
+            placeholder="输入模型名称（如 deepseek-chat）"
+            size="large"
+          >
+            <template #prefix>🤖</template>
+          </n-auto-complete>
+        </n-form-item>
 
-    <p class="em-foot-note">密钥仅存于本地配置，不会写入作品数据。修改后请点击「保存配置」生效。</p>
+        <!-- 高级参数折叠 -->
+        <n-collapse>
+          <n-collapse-item title="⚙️ 高级参数" name="advanced">
+            <n-grid :cols="2" :x-gap="16" :y-gap="12">
+              <n-gi>
+                <n-form-item label="温度">
+                  <n-slider v-model:value="formData.temperature" :min="0" :max="2" :step="0.1" />
+                  <span class="param-value">{{ formData.temperature }}</span>
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="最大 Token">
+                  <n-input-number v-model:value="formData.max_tokens" :min="256" :max="200000" :step="1024" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="超时(秒)">
+                  <n-input-number v-model:value="formData.timeout_seconds" :min="10" :max="3600" :step="30" />
+                </n-form-item>
+              </n-gi>
+              <n-gi>
+                <n-form-item label="协议">
+                  <n-select v-model:value="formData.protocol" :options="protocolOptions" />
+                </n-form-item>
+              </n-gi>
+            </n-grid>
+          </n-collapse-item>
+        </n-collapse>
+      </n-form>
+    </section>
+
+    <!-- 快速配置提示 -->
+    <section class="es-section" v-if="selectedPresetInfo?.setup_hint">
+      <n-alert type="info" :title="`💡 ${selectedPresetInfo?.label} 配置提示`">
+        <div v-html="selectedPresetInfo?.setup_hint"></div>
+      </n-alert>
+    </section>
+
+    <!-- 多角色端点 -->
+    <n-collapse>
+      <n-collapse-item title="🔧 多角色端点（高级）" name="multi-role">
+        <p class="es-hint">主力 / 经济 / 知识图谱可分别配置不同模型和密钥。</p>
+        <n-switch v-model:value="isIndependent" size="medium">
+          <template #checked>独立端点</template>
+          <template #unchecked>统一端点</template>
+        </n-switch>
+
+        <template v-if="isIndependent">
+          <n-tabs type="segment" v-model:value="activeRole" style="margin-top: 12px">
+            <n-tab-pane name="cheap" tab="💰 经济模型">
+              <n-form label-placement="left" label-width="80" class="es-form">
+                <n-form-item label="API Key">
+                  <n-input v-model:value="cheapData.api_key" type="password" show-password-on="click" placeholder="留空则跟随主力模型" />
+                </n-form-item>
+                <n-form-item label="Base URL">
+                  <n-input v-model:value="cheapData.base_url" placeholder="留空则跟随主力模型" />
+                </n-form-item>
+                <n-form-item label="模型">
+                  <n-input v-model:value="cheapData.model" placeholder="轻量/低成本模型 ID" />
+                </n-form-item>
+              </n-form>
+            </n-tab-pane>
+            <n-tab-pane name="kg" tab="🧠 知识图谱">
+              <n-form label-placement="left" label-width="80" class="es-form">
+                <n-form-item label="API Key">
+                  <n-input v-model:value="kgData.api_key" type="password" show-password-on="click" placeholder="留空则跟随主力模型" />
+                </n-form-item>
+                <n-form-item label="Base URL">
+                  <n-input v-model:value="kgData.base_url" placeholder="留空则跟随主力模型" />
+                </n-form-item>
+                <n-form-item label="模型">
+                  <n-input v-model:value="kgData.model" placeholder="需较强指令遵循能力的模型" />
+                </n-form-item>
+              </n-form>
+            </n-tab-pane>
+          </n-tabs>
+        </template>
+      </n-collapse-item>
+    </n-collapse>
+
+    <p class="es-footer-note">
+      🔒 密钥仅存于本地 SQLite 数据库，不会上传到任何服务器。
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { llmControlApi, type LLMControlPanelData, type LLMProfile, type LLMProtocol } from '@/api/llmControl'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '@/constants/llm'
-import EndpointGrid from './EngineMatrixEndpointGrid.vue'
-import InferenceCollapse from './EngineMatrixInferenceCollapse.vue'
 
 const message = useMessage()
 const saving = ref(false)
-const isUnifiedMode = ref(true)
-const activeRole = ref<'main' | 'cheap' | 'kg'>('main')
+const testing = ref(false)
+const connectionStatus = ref<'idle' | 'testing' | 'ok' | 'error'>('idle')
+const connectionMessage = ref('')
+const selectedPreset = ref('')
+const isIndependent = ref(false)
+const activeRole = ref('cheap')
 
-const independentTabs = [
-  { key: 'main' as const, label: '主力', hint: '写作' },
-  { key: 'cheap' as const, label: '经济', hint: '批量' },
-  { key: 'kg' as const, label: '图谱', hint: '抽取' },
+// ── 厂商预设 ──
+const presets = [
+  { key: 'deepseek', label: 'DeepSeek', icon: '🔮', protocol: 'openai', default_base_url: 'https://api.deepseek.com/v1', recommended: true, tags: ['domestic'], default_model: 'deepseek-chat', models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-coder'], setup_hint: '访问 <a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a> 获取 API Key。推荐模型：deepseek-chat（通用）、deepseek-reasoner（推理）。' },
+  { key: 'doubao-ark', label: '豆包 / Ark', icon: '🫘', protocol: 'openai', default_base_url: 'https://ark.cn-beijing.volces.com/api/v3', recommended: true, tags: ['domestic'], default_model: '', models: [], setup_hint: '访问 <a href="https://console.volcengine.com/ark" target="_blank">火山方舟控制台</a> 创建推理接入点，复制 Endpoint ID 作为模型名。' },
+  { key: 'siliconflow', label: 'SiliconFlow', icon: '🌊', protocol: 'openai', default_base_url: 'https://api.siliconflow.cn/v1', tags: ['domestic', 'free'], default_model: 'deepseek-ai/DeepSeek-V3', models: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-72B-Instruct', 'THUDM/glm-4-9b-chat'], setup_hint: '访问 <a href="https://cloud.siliconflow.cn" target="_blank">SiliconFlow</a> 注册即可获得免费额度，支持多种开源模型。' },
+  { key: 'minimax', label: 'MiniMax', icon: '🤖', protocol: 'openai', default_base_url: 'https://api.minimax.chat/v1', tags: ['domestic'], default_model: 'MiniMax-Text-01', models: ['MiniMax-Text-01', 'abab7-chat'], setup_hint: '访问 <a href="https://platform.minimaxi.com" target="_blank">MiniMax 开放平台</a> 获取 API Key。' },
+  { key: 'mimo', label: '小米 MiMo', icon: '📱', protocol: 'openai', default_base_url: 'https://api.xiaomimimo.com/v1', tags: ['domestic', 'free'], default_model: 'MiMo-7B-RL', models: ['MiMo-7B-RL', 'MiMo-7B-SFT'], setup_hint: '小米 MiMo 推理模型，支持两种使用方式：<br><br><b>① 按量付费</b>（API Key 格式 <code>sk-xxx</code>）<br>Base URL：<code>https://api.xiaomimimo.com/v1</code><br>前往 <a href="https://platform.xiaomimimo.com" target="_blank">API Keys</a> 创建 Key<br><br><b>② Token Plan</b>（固定订阅，API Key 格式 <code>tp-xxx</code>）<br>Base URL：<code>https://token-plan-cn.xiaomimimo.com/v1</code><br>订阅后前往 <a href="https://platform.xiaomimimo.com" target="_blank">Token Plan</a> 获取专属 Key<br><br>两种均支持 OpenAI 和 Anthropic 兼容协议，系统会根据你选的协议自动切换。<br>MiMo-7B-RL 擅长数学与代码推理。' },
+  { key: 'moonshot', label: 'Moonshot', icon: '🌙', protocol: 'openai', default_base_url: 'https://api.moonshot.cn/v1', tags: ['domestic'], default_model: 'moonshot-v1-128k', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], setup_hint: '访问 <a href="https://platform.moonshot.cn" target="_blank">Moonshot 开放平台</a> 获取 API Key。推荐 moonshot-v1-128k（长上下文）。' },
+  { key: 'qwen-dashscope', label: '通义千问', icon: '☁️', protocol: 'openai', default_base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', tags: ['domestic'], default_model: 'qwen-plus', models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long'], setup_hint: '访问 <a href="https://dashscope.console.aliyun.com" target="_blank">阿里云百炼</a> 获取 API Key。推荐 qwen-plus（性价比高）。' },
+  { key: 'glm-openai', label: '智谱 GLM', icon: '🧊', protocol: 'openai', default_base_url: 'https://open.bigmodel.cn/api/paas/v4', tags: ['domestic'], default_model: 'glm-4-flash', models: ['glm-4-flash', 'glm-4-plus', 'glm-4-long'], setup_hint: '访问 <a href="https://open.bigmodel.cn" target="_blank">智谱开放平台</a> 获取 API Key。glm-4-flash 免费使用。' },
+  { key: 'qianfan', label: '百度千帆', icon: '🔵', protocol: 'openai', default_base_url: 'https://qianfan.baidubce.com/v2', tags: ['domestic'], default_model: 'ernie-4.0-8k', models: ['ernie-4.0-8k', 'ernie-3.5-8k', 'ernie-speed-128k'], setup_hint: '访问 <a href="https://console.bce.baidu.com/qianfan" target="_blank">百度千帆</a> 获取 API Key。' },
+  { key: 'yi', label: '零一万物', icon: '✨', protocol: 'openai', default_base_url: 'https://api.lingyiwanwu.com/v1', tags: ['domestic'], default_model: 'yi-large', models: ['yi-large', 'yi-medium', 'yi-spark'], setup_hint: '访问 <a href="https://platform.lingyiwanwu.com" target="_blank">零一万物开放平台</a> 获取 API Key。' },
+  { key: 'openai-official', label: 'OpenAI', icon: '🟢', protocol: 'openai', default_base_url: 'https://api.openai.com/v1', tags: [], default_model: 'gpt-4o', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-mini'], setup_hint: '需要海外网络。访问 <a href="https://platform.openai.com" target="_blank">platform.openai.com</a> 获取 API Key。' },
+  { key: 'claude-official', label: 'Claude', icon: '🟠', protocol: 'anthropic', default_base_url: 'https://api.anthropic.com', tags: [], default_model: 'claude-sonnet-4-20250514', models: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-haiku-4-20250414'], setup_hint: '需要海外网络。访问 <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> 获取 API Key。' },
+  { key: 'gemini-official', label: 'Gemini', icon: '💎', protocol: 'gemini', default_base_url: 'https://generativelanguage.googleapis.com/v1beta', tags: ['free'], default_model: 'gemini-2.0-flash', models: ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'], setup_hint: '访问 <a href="https://aistudio.google.com" target="_blank">Google AI Studio</a> 获取 API Key。免费额度充足。' },
+  { key: 'custom', label: '自定义', icon: '🔧', protocol: 'openai', default_base_url: '', tags: [], default_model: '', models: [], setup_hint: '' },
 ]
 
-const ROLE_MAIN = '主力模型'
-const ROLE_CHEAP = '经济模型'
-const ROLE_KG = '知识图谱模型'
+const selectedPresetInfo = computed(() => presets.find(p => p.key === selectedPreset.value))
 
-interface ModelRoleConfig {
-  default_model_provider: string
-  default_model_api_key: string
-  default_model_base_url: string
-  default_model: string
-  default_temperature: number
-  default_max_tokens: number
-  default_timeout_seconds: number
-  cheap_model_provider: string
-  cheap_model_api_key: string
-  cheap_model_base_url: string
-  cheap_model: string
-  cheap_temperature: number
-  cheap_max_tokens: number
-  cheap_timeout_seconds: number
-  knowledge_model_provider: string
-  knowledge_model_api_key: string
-  knowledge_model_base_url: string
-  knowledge_model: string
-  knowledge_temperature: number
-  knowledge_max_tokens: number
-  knowledge_timeout_seconds: number
-}
-
-const formData = reactive<ModelRoleConfig>({
-  default_model_provider: 'openai',
-  default_model_api_key: '',
-  default_model_base_url: '',
-  default_model: '',
-  default_temperature: 0.7,
-  default_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  default_timeout_seconds: 300,
-  cheap_model_provider: 'openai',
-  cheap_model_api_key: '',
-  cheap_model_base_url: '',
-  cheap_model: '',
-  cheap_temperature: 0.5,
-  cheap_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  cheap_timeout_seconds: 300,
-  knowledge_model_provider: 'openai',
-  knowledge_model_api_key: '',
-  knowledge_model_base_url: '',
-  knowledge_model: '',
-  knowledge_temperature: 0.3,
-  knowledge_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  knowledge_timeout_seconds: 300,
+const modelSuggestions = computed(() => {
+  const models = selectedPresetInfo.value?.models || []
+  return models.map(m => ({ label: m, value: m }))
 })
 
-function pickMainProfile(profiles: LLMProfile[], activeId: string | null): LLMProfile | undefined {
-  return profiles.find((p) => p.name === ROLE_MAIN)
-    || profiles.find((p) => p.id === activeId)
-    || profiles[0]
+const protocolOptions = [
+  { label: 'OpenAI 兼容', value: 'openai' },
+  { label: 'Anthropic', value: 'anthropic' },
+  { label: 'Gemini', value: 'gemini' },
+]
+
+// ── 表单数据 ──
+const formData = reactive({
+  api_key: '',
+  base_url: '',
+  model: '',
+  temperature: 0.7,
+  max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  timeout_seconds: 300,
+  protocol: 'openai' as string,
+})
+
+const cheapData = reactive({ api_key: '', base_url: '', model: '' })
+const kgData = reactive({ api_key: '', base_url: '', model: '' })
+
+function selectPreset(preset: typeof presets[0]) {
+  selectedPreset.value = preset.key
+  formData.base_url = preset.default_base_url
+  formData.model = preset.default_model
+  formData.protocol = preset.protocol
 }
 
-function pickCheapProfile(profiles: LLMProfile[]): LLMProfile | undefined {
-  return profiles.find((p) => p.name === ROLE_CHEAP)
-    || profiles.find((p) => p.name.includes('经济') && (p.name.includes('模型') || p.name.toLowerCase().includes('cheap')))
-}
-
-function pickKgProfile(profiles: LLMProfile[]): LLMProfile | undefined {
-  return profiles.find((p) => p.name === ROLE_KG)
-    || profiles.find((p) => p.name.includes('知识') && p.name.includes('图谱'))
-}
-
-function applyProfileToForm(prefix: 'default' | 'cheap' | 'knowledge', p: LLMProfile | undefined) {
-  if (!p) return
-  if (prefix === 'default') {
-    formData.default_model_provider = p.protocol
-    formData.default_model_api_key = p.api_key
-    formData.default_model_base_url = p.base_url
-    formData.default_model = p.model
-    formData.default_temperature = p.temperature
-    formData.default_max_tokens = p.max_tokens
-    formData.default_timeout_seconds = p.timeout_seconds
-    return
+// MiMo 智能识别：根据 API Key 前缀自动切换 Base URL
+watch(() => formData.api_key, (key) => {
+  if (selectedPreset.value !== 'mimo') return
+  const trimmed = (key || '').trim()
+  if (trimmed.startsWith('tp-')) {
+    // Token Plan 模式
+    if (formData.protocol === 'anthropic') {
+      formData.base_url = 'https://token-plan-cn.xiaomimimo.com/anthropic'
+    } else {
+      formData.base_url = 'https://token-plan-cn.xiaomimimo.com/v1'
+    }
+  } else if (trimmed.startsWith('sk-')) {
+    // 按量付费模式
+    if (formData.protocol === 'anthropic') {
+      formData.base_url = 'https://api.xiaomimimo.com/anthropic'
+    } else {
+      formData.base_url = 'https://api.xiaomimimo.com/v1'
+    }
   }
-  if (prefix === 'cheap') {
-    formData.cheap_model_provider = p.protocol
-    formData.cheap_model_api_key = p.api_key
-    formData.cheap_model_base_url = p.base_url
-    formData.cheap_model = p.model
-    formData.cheap_temperature = p.temperature
-    formData.cheap_max_tokens = p.max_tokens
-    formData.cheap_timeout_seconds = p.timeout_seconds
-    return
-  }
-  formData.knowledge_model_provider = p.protocol
-  formData.knowledge_model_api_key = p.api_key
-  formData.knowledge_model_base_url = p.base_url
-  formData.knowledge_model = p.model
-  formData.knowledge_temperature = p.temperature
-  formData.knowledge_max_tokens = p.max_tokens
-  formData.knowledge_timeout_seconds = p.timeout_seconds
-}
+})
 
+// MiMo 协议切换时同步 Base URL
+watch(() => formData.protocol, (proto) => {
+  if (selectedPreset.value !== 'mimo') return
+  const isTp = (formData.api_key || '').trim().startsWith('tp-')
+  if (proto === 'anthropic') {
+    formData.base_url = isTp
+      ? 'https://token-plan-cn.xiaomimimo.com/anthropic'
+      : 'https://api.xiaomimimo.com/anthropic'
+  } else {
+    formData.base_url = isTp
+      ? 'https://token-plan-cn.xiaomimimo.com/v1'
+      : 'https://api.xiaomimimo.com/v1'
+  }
+})
+
+// ── 加载配置 ──
 async function loadData() {
   try {
     const data: LLMControlPanelData = await llmControlApi.getPanel()
     const profiles = data.config.profiles
-    const main = pickMainProfile(profiles, data.config.active_profile_id)
-    applyProfileToForm('default', main)
-    applyProfileToForm('cheap', pickCheapProfile(profiles))
-    applyProfileToForm('knowledge', pickKgProfile(profiles))
-    isUnifiedMode.value = (data.config.endpoint_mode ?? 'unified') !== 'independent'
-  } catch {
-    /* 使用默认值 */
+    const activeId = data.config.active_profile_id
+    const main = profiles.find(p => p.name === '主力模型') || profiles.find(p => p.id === activeId) || profiles[0]
+
+    if (main) {
+      // 匹配预设
+      const matchedPreset = presets.find(p =>
+        main.base_url?.includes(p.default_base_url?.replace('https://', '').split('/')[0] || '___')
+      )
+      selectedPreset.value = matchedPreset?.key || 'custom'
+      formData.api_key = main.api_key || ''
+      formData.base_url = main.base_url || ''
+      formData.model = main.model || ''
+      formData.temperature = main.temperature ?? 0.7
+      formData.max_tokens = main.max_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+      formData.timeout_seconds = main.timeout_seconds ?? 300
+      formData.protocol = main.protocol || 'openai'
+    }
+
+    isIndependent.value = (data.config.endpoint_mode ?? 'unified') === 'independent'
+
+    const cheap = profiles.find(p => p.name.includes('经济'))
+    if (cheap) {
+      cheapData.api_key = cheap.api_key || ''
+      cheapData.base_url = cheap.base_url || ''
+      cheapData.model = cheap.model || ''
+    }
+    const kg = profiles.find(p => p.name.includes('知识') && p.name.includes('图谱'))
+    if (kg) {
+      kgData.api_key = kg.api_key || ''
+      kgData.base_url = kg.base_url || ''
+      kgData.model = kg.model || ''
+    }
+  } catch { /* 默认值 */ }
+}
+
+// ── 测试连接 ──
+async function handleTest() {
+  if (!formData.api_key && !formData.base_url) {
+    message.warning('请先填写 API Key 和 Base URL')
+    return
+  }
+  testing.value = true
+  connectionStatus.value = 'testing'
+  connectionMessage.value = '正在测试连接...'
+  try {
+    const result = await llmControlApi.testProfile({
+      id: 'test',
+      name: 'test',
+      protocol: formData.protocol as LLMProtocol,
+      api_key: formData.api_key,
+      base_url: formData.base_url,
+      model: formData.model,
+      temperature: formData.temperature,
+      max_tokens: formData.max_tokens,
+      timeout_seconds: formData.timeout_seconds,
+      extra_headers: {},
+      extra_query: {},
+      extra_body: {},
+      notes: '',
+      preset_key: selectedPreset.value || 'custom-openai-compatible',
+      use_legacy_chat_completions: false,
+    })
+    if (result?.ok) {
+      connectionStatus.value = 'ok'
+      connectionMessage.value = `连接成功！模型 ${result.model || formData.model || '(默认)'} 可用。延迟 ${result.latency_ms || '?'}ms`
+    } else {
+      connectionStatus.value = 'error'
+      connectionMessage.value = (result as any)?.error || '连接失败，请检查配置'
+    }
+  } catch (err: any) {
+    connectionStatus.value = 'error'
+    connectionMessage.value = err?.response?.data?.detail || err?.message || '测试失败'
+  } finally {
+    testing.value = false
   }
 }
 
-function buildProfilePayload(
-  existing: LLMProfile | undefined,
-  idFallback: string,
-  name: string,
-  provider: string,
-  key: string,
-  url: string,
-  model: string,
-  temperature: number,
-  maxTokens: number,
-  timeoutSeconds: number,
-): LLMProfile {
-  return {
-    id: existing?.id || idFallback,
-    name,
-    protocol: provider as LLMProtocol,
-    base_url: url,
-    api_key: key,
-    model,
-    temperature,
-    max_tokens: maxTokens,
-    timeout_seconds: Math.round(timeoutSeconds),
-    extra_headers: existing?.extra_headers ?? {},
-    extra_query: existing?.extra_query ?? {},
-    extra_body: existing?.extra_body ?? {},
-    notes: existing?.notes ?? '',
-    preset_key: existing?.preset_key ?? 'custom-openai-compatible',
-    use_legacy_chat_completions: existing?.use_legacy_chat_completions ?? false,
-  }
-}
-
-const roleKeyFlag = computed(() => (isUnifiedMode.value ? 'uni' : 'ind'))
-
+// ── 保存配置 ──
 async function handleSave() {
   saving.value = true
   try {
     const data: LLMControlPanelData = await llmControlApi.getPanel()
     const profiles: LLMProfile[] = [...data.config.profiles]
+    const mainExisting = profiles.find(p => p.name === '主力模型') || profiles.find(p => p.id === data.config.active_profile_id) || profiles[0]
 
-    const mainExisting =
-      profiles.find((p) => p.name === ROLE_MAIN)
-      || profiles.find((p) => p.id === data.config.active_profile_id)
-      || profiles[0]
-
-    const mainProfile = buildProfilePayload(
-      mainExisting,
-      mainExisting?.id || 'main-default',
-      ROLE_MAIN,
-      formData.default_model_provider,
-      formData.default_model_api_key,
-      formData.default_model_base_url,
-      formData.default_model,
-      formData.default_temperature,
-      formData.default_max_tokens,
-      formData.default_timeout_seconds,
-    )
-
-    const idx0 = profiles.findIndex((p) => p.id === mainProfile.id)
-    if (idx0 >= 0) {
-      profiles[idx0] = mainProfile
-    } else {
-      const iNamed = profiles.findIndex((p) => p.name === ROLE_MAIN)
-      if (iNamed >= 0) profiles[iNamed] = mainProfile
-      else profiles.unshift(mainProfile)
+    const mainProfile: LLMProfile = {
+      id: mainExisting?.id || 'main-default',
+      name: '主力模型',
+      protocol: formData.protocol as LLMProtocol,
+      base_url: formData.base_url,
+      api_key: formData.api_key,
+      model: formData.model,
+      temperature: formData.temperature,
+      max_tokens: formData.max_tokens,
+      timeout_seconds: formData.timeout_seconds,
+      extra_headers: mainExisting?.extra_headers ?? {},
+      extra_query: mainExisting?.extra_query ?? {},
+      extra_body: mainExisting?.extra_body ?? {},
+      notes: mainExisting?.notes ?? '',
+      preset_key: selectedPreset.value || 'custom-openai-compatible',
+      use_legacy_chat_completions: mainExisting?.use_legacy_chat_completions ?? false,
     }
 
-    if (!isUnifiedMode.value) {
-      const upsertRole = (
-        name: string,
-        idSeed: string,
-        provider: string,
-        key: string,
-        url: string,
-        model: string,
-        temperature: number,
-        maxTokens: number,
-        timeoutSeconds: number,
-      ) => {
-        const existingIdx = profiles.findIndex((p) => p.name === name)
-        const existing = existingIdx >= 0 ? profiles[existingIdx] : undefined
-        const roleProfile = buildProfilePayload(
-          existing,
-          existing?.id || `${idSeed}-${roleKeyFlag.value}-${Date.now()}`,
-          name,
-          provider,
-          key,
-          url,
-          model,
-          temperature,
-          maxTokens,
-          timeoutSeconds,
-        )
-        if (existingIdx >= 0) profiles[existingIdx] = roleProfile
-        else profiles.push(roleProfile)
-      }
-
-      upsertRole(
-        ROLE_CHEAP,
-        'cheap',
-        formData.cheap_model_provider,
-        formData.cheap_model_api_key,
-        formData.cheap_model_base_url,
-        formData.cheap_model,
-        formData.cheap_temperature,
-        formData.cheap_max_tokens,
-        formData.cheap_timeout_seconds,
-      )
-      upsertRole(
-        ROLE_KG,
-        'kg',
-        formData.knowledge_model_provider,
-        formData.knowledge_model_api_key,
-        formData.knowledge_model_base_url,
-        formData.knowledge_model,
-        formData.knowledge_temperature,
-        formData.knowledge_max_tokens,
-        formData.knowledge_timeout_seconds,
-      )
-    } else {
-      for (let i = profiles.length - 1; i >= 0; i--) {
-        const n = profiles[i].name
-        if (n === ROLE_MAIN) continue
-        if (
-          n === ROLE_CHEAP
-          || n === ROLE_KG
-          || (n.includes('经济') && n.includes('模型'))
-          || (n.includes('知识') && n.includes('图谱'))
-        ) {
-          profiles.splice(i, 1)
-        }
-      }
-    }
+    const idx = profiles.findIndex(p => p.id === mainProfile.id)
+    if (idx >= 0) profiles[idx] = mainProfile
+    else profiles.unshift(mainProfile)
 
     const newConfig = {
       ...data.config,
-      version: 1,
-      endpoint_mode: (isUnifiedMode.value ? 'unified' : 'independent') as 'unified' | 'independent',
+      endpoint_mode: (isIndependent.value ? 'independent' : 'unified') as 'unified' | 'independent',
       active_profile_id: mainProfile.id,
       profiles,
     }
 
     await llmControlApi.saveConfig(newConfig)
-    message.success('配置已保存，系统已切换路由通道')
-    await loadData()
+    message.success('✅ 配置已保存')
+    connectionStatus.value = 'idle'
   } catch {
     message.error('保存失败')
   } finally {
@@ -392,177 +417,152 @@ async function handleSave() {
   }
 }
 
-onMounted(() => {
-  void loadData()
-})
+onMounted(() => { void loadData() })
 </script>
 
 <style scoped>
-.em {
-  max-width: 760px;
+.engine-settings {
+  max-width: 800px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 20px;
 }
 
-.em-head {
+.es-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 
-.em-head-copy h4 {
+.es-header-info h4 {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 700;
-  color: var(--app-text-primary);
+  color: var(--app-text-primary, #1f2937);
 }
 
-.em-head-copy p {
+.es-header-info p {
   margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--app-text-muted);
-  max-width: 520px;
-}
-
-.em-mode {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--app-border);
-  background: var(--app-surface);
-}
-
-.em-mode--unified {
-  border-color: color-mix(in srgb, var(--color-brand) 35%, var(--app-border));
-  background: color-mix(in srgb, var(--color-brand-light, rgba(37, 99, 235, 0.08)) 55%, var(--app-surface));
-}
-
-.em-mode-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.em-mode-badge {
-  display: inline-flex;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  background: var(--app-border);
-  color: var(--app-text-muted);
-}
-
-.em-mode--unified .em-mode-badge {
-  background: var(--color-brand-light);
-  color: var(--color-brand);
-}
-
-.em-mode-copy p {
-  margin: 6px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--app-text-muted);
-}
-
-.em-role-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.em-role-tab {
-  display: grid;
-  gap: 2px;
-  padding: 8px 6px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-surface);
-  cursor: pointer;
-  text-align: center;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.em-role-tab:hover {
-  border-color: color-mix(in srgb, var(--color-brand) 28%, var(--app-border));
-}
-
-.em-role-tab.active {
-  border-color: var(--color-brand-border);
-  background: var(--color-brand-light);
-}
-
-.em-role-tab strong {
-  font-size: 12px;
-  color: var(--app-text-primary);
-}
-
-.em-role-tab span {
-  font-size: 10px;
-  color: var(--app-text-muted);
-}
-
-.em-body {
-  max-height: min(68vh, 640px);
-  overflow-y: auto;
-  padding-right: 4px;
-  scrollbar-width: thin;
-}
-
-.em-role-card {
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--app-border);
-  border-left-width: 3px;
-  background: var(--app-surface);
-}
-
-.em-role-card--main { border-left-color: var(--color-brand); }
-.em-role-card--cheap { border-left-color: var(--color-warning); }
-.em-role-card--kg { border-left-color: var(--color-info, #3b82f6); }
-
-.em-role-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.em-role-title {
   font-size: 13px;
-  font-weight: 700;
-  color: var(--app-text-primary);
+  color: var(--app-text-muted, #6b7280);
 }
 
-.em-role-tag {
-  font-size: 10px;
+.es-section-title {
+  font-size: 14px;
   font-weight: 600;
-  padding: 2px 7px;
+  color: var(--app-text-primary, #1f2937);
+  margin-bottom: 12px;
+}
+
+/* ── 厂商预设卡片网格 ── */
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px;
+  border: 2px solid var(--app-border, #e5e7eb);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: var(--app-surface, #fff);
+  text-align: center;
+  position: relative;
+}
+
+.preset-card:hover {
+  border-color: var(--color-brand, #4f46e5);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.preset-card.active {
+  border-color: var(--color-brand, #4f46e5);
+  background: var(--color-brand-light, #eef2ff);
+  box-shadow: 0 0 0 1px var(--color-brand, #4f46e5), 0 4px 12px rgba(79, 70, 229, 0.15);
+}
+
+.preset-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.preset-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-primary, #1f2937);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.preset-tags {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.preset-badge {
+  font-size: 10px;
+  padding: 1px 5px;
   border-radius: 999px;
-  background: var(--app-surface-subtle);
-  color: var(--app-text-muted);
+  font-weight: 600;
 }
 
-.em-foot-note {
-  margin: 0;
+.preset-badge.recommend {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.preset-badge.domestic {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.preset-badge.free {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+/* ── 表单 ── */
+.es-form {
+  padding: 8px 0;
+}
+
+.param-value {
+  font-size: 12px;
+  color: var(--app-text-muted, #6b7280);
+  margin-left: 8px;
+  min-width: 30px;
+}
+
+.es-hint {
+  font-size: 12px;
+  color: var(--app-text-muted, #6b7280);
+  margin-bottom: 12px;
+}
+
+.es-footer-note {
   font-size: 11px;
-  color: var(--app-text-muted);
-  line-height: 1.5;
+  color: var(--app-text-muted, #9ca3af);
+  text-align: center;
+  padding: 8px 0;
 }
 
-@media (max-width: 560px) {
-  .em-head {
-    flex-direction: column;
-    align-items: stretch;
+@media (max-width: 640px) {
+  .preset-grid {
+    grid-template-columns: repeat(3, 1fr);
   }
-
-  .em-mode {
+  .es-header {
     flex-direction: column;
   }
 }

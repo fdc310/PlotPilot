@@ -143,18 +143,34 @@ class BackendLifecycle:
         self._logger.info("Startup: FastAPI application is ready")
         self._logger.info("Startup: registered routes=%s", registered_route_count)
 
-        if os.name == "nt" and self._cleanup_orphans is not None:
-            self._logger.info("Startup: checking for orphan Windows backend processes")
-            self._cleanup_orphans()
+        # Orphan cleanup disabled to avoid killing parent processes in CLI/development mode
+        # if os.name == "nt" and self._cleanup_orphans is not None:
+        #     self._logger.info("Startup: checking for orphan Windows backend processes")
+        #     self._cleanup_orphans()
 
         from infrastructure.persistence.database.write_dispatch import startup_sqlite_writes_bypass_queue
 
-        with startup_sqlite_writes_bypass_queue():
-            self.stop_all_running_novels()
+        try:
+            with startup_sqlite_writes_bypass_queue():
+                self.stop_all_running_novels()
+        except Exception as e:
+            self._logger.warning("Startup: stop_all_running_novels failed (continuing): %s", e)
 
-        self.bootstrap_persistence_consumer()
-        self.recover_drafts()
-        self._start_daemon()
+        try:
+            self.bootstrap_persistence_consumer()
+        except Exception as e:
+            self._logger.warning("Startup: bootstrap_persistence_consumer failed: %s", e)
+
+        try:
+            self.recover_drafts()
+        except Exception as e:
+            self._logger.warning("Startup: recover_drafts failed: %s", e)
+
+        try:
+            self._start_daemon()
+        except Exception as e:
+            self._logger.warning("Startup: start_daemon failed: %s", e)
+
         self.init_dag_node_registry()
 
     def shutdown(self) -> None:

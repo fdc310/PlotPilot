@@ -656,9 +656,11 @@ class BaseStoryPipeline(ABC):
                     "viewpoint": report.viewpoint_score,
                     "rhythm": report.rhythm_score,
                 }
+                if not report.passed and report.all_violations:
+                    await self._auto_fix_violations(ctx, report)
                 return StepResult.ok() if report.passed else StepResult(
                     passed=True,  # 不阻断
-                    message=f"验证未通过 (score={report.overall_score:.2f})",
+                    message=f"验证未通过 (score={report.overall_score:.2f}, violations={len(report.all_violations)})",
                     score=report.overall_score,
                     violations=report.all_violations,
                 )
@@ -1145,10 +1147,214 @@ class BaseStoryPipeline(ABC):
         ctx.chapter_repository.save(chapter)
 
     async def _apply_voice_rewrite_loop(self, ctx: PipelineContext) -> None:
-        """声线漂移定向改写循环"""
+        """声线漂移定向改写循环 — 通过 AI invocation 执行有限次修文"""
+        from application.ai.llm_output_sanitize import strip_reasoning_artifacts
+
+        current_content = ctx.chapter_content or ""
+        current_similarity = ctx.similarity_score
+        if current_similarity is None:
+            ctx.rewrite_applied = False
+            ctx.rewrite_attempts = 0
+            return
+
+        for attempt in range(1, self.VOICE_REWRITE_MAX_ATTEMPTS + 1):
+            if float(current_similarity) >= self.VOICE_REWRITE_THRESHOLD:
+                break
+
+            ctx.rewrite_attempts = attempt
+            logger.warning(
+                "[%s] 章节 %d 声线漂移严重 (similarity=%.4f)，第 %d/%d 次定向改写",
+                ctx.novel_id, ctx.chapter_number, float(current_similarity),
+                attempt, self.VOICE_REWRITE_MAX_ATTEMPTS,
+            )
+
+            try:
+                rewritten = await self._do_single_voice_rewrite(
+                    ctx, current_content, float(current_similarity), attempt,
+                )
+            except Exception as e:
+                logger.warning("[%s] 声线改写失败 (attempt=%d): %s", ctx.novel_id, attempt, e)
+                break
+
+            if not rewritten or rewritten.strip() == current_content.strip():
+                logger.warning("[%s] 定向改写未产生有效变化，停止重试", ctx.novel_id)
+                break
+
+            current_content = strip_reasoning_artifacts(rewritten.strip())
+
+            # 保存改写内容
+            if ctx.chapter_repository:
+                try:
+                    ctx.chapter_repository.update_content(
+                        ctx.novel_id, ctx.chapter_number, current_content,
+                    )
+                except Exception:
+                    pass
+
+            # 复评声线
+            if ctx.voice_drift_service:
+                try:
+                    voice_svc = ctx.voice_drift_service
+                    if getattr(voice_svc, "use_llm_mode", False):
+                        re_score = await voice_svc.score_chapter_async(
+                            novel_id=str(ctx.novel_id),
+                            chapter_number=ctx.chapter_number,
+                            content=current_content,
+                        )
+                    else:
+                        re_score = voice_svc.score_chapter(
+                            novel_id=str(ctx.novel_id),
+                            chapter_number=ctx.chapter_number,
+                            content=current_content,
+                        )
+                    current_similarity = re_score.get("similarity_score", current_similarity)
+                    ctx.similarity_score = current_similarity
+                    logger.info(
+                        "[%s] 第 %d 次改写后相似度=%.4f",
+                        ctx.novel_id, attempt, float(current_similarity),
+                    )
+                except Exception as e:
+                    logger.debug("[%s] 改写后复评失败: %s", ctx.novel_id, e)
+
+        ctx.chapter_content = current_content
         ctx.rewrite_applied = True
-        ctx.rewrite_attempts = min(self.VOICE_REWRITE_MAX_ATTEMPTS, 1)
-        # 具体改写逻辑委托给 voice_drift_service
+
+    async def _do_single_voice_rewrite(
+        self,
+        ctx: PipelineContext,
+        content: str,
+        similarity_score: float,
+        attempt: int,
+    ) -> Optional[str]:
+        """执行一次定向声线改写 — 使用 AI invocation 系统"""
+        from application.ai_invocation.autopilot.factory import get_or_create_autopilot_helper_invoker
+        from application.ai_invocation.autopilot.helper_invoker import AutopilotHelperRequest
+        from application.ai.trace_context import ensure_trace
+        from infrastructure.ai.prompt_keys import VOICE_REWRITE
+
+        host = ctx.get_dep("autopilot_host")
+        if not host or not ctx.llm_service:
+            return None
+
+        ensure_trace(novel_id=str(ctx.novel_id), stage="pipeline.voice_rewrite", stage_label="声线改写")
+
+        # 构建改写变量
+        style_fingerprint = "暂无明确统计摘要，优先保持既有作者语气与句式节奏。"
+        anchor_block = ctx.voice_anchors if isinstance(ctx.voice_anchors, str) else str(ctx.voice_anchors or "无额外角色声线锚点。")
+        outline = (ctx.outline or "").strip() or "无单独大纲，必须严格保留现有剧情事实。"
+
+        helper = get_or_create_autopilot_helper_invoker(host, llm_service=ctx.llm_service)
+        rewritten_text = await helper.invoke_text(
+            AutopilotHelperRequest(
+                novel_id=str(ctx.novel_id),
+                stage="audit",
+                operation="autopilot.voice.rewrite",
+                node_key=VOICE_REWRITE,
+                explicit_variables={
+                    "style_fingerprint": style_fingerprint,
+                    "anchor_block": anchor_block,
+                    "chapter_number": str(ctx.chapter_number),
+                    "attempt": str(attempt),
+                    "similarity_score": f"{similarity_score:.4f}",
+                    "threshold": f"{self.VOICE_REWRITE_THRESHOLD:.2f}",
+                    "outline": outline,
+                    "content": content,
+                },
+                context={
+                    "novel_id": str(ctx.novel_id),
+                    "chapter_number": ctx.chapter_number,
+                },
+                metadata={"source": "story_pipeline.voice_rewrite"},
+                config={
+                    "max_tokens": max(4096, min(8192, int(len(content) * 1.5))),
+                    "temperature": 0.35,
+                },
+            )
+        )
+        return (rewritten_text or "").strip() or None
+
+    async def _auto_fix_violations(self, ctx: PipelineContext, report: Any) -> None:
+        """自动修复高严重度策略违规 — 通过 AI invocation 改写问题段落。
+
+        仅在 balanced/aggressive 模式下生效。最多修复 2 轮。
+        """
+        from domain.novel.entities.novel import AutoAILevel
+
+        auto_level = AutoAILevel.CONSERVATIVE
+        # 从上下文中获取 auto_ai_level（通过 novel_repository 查询）
+        if ctx.novel_repository:
+            try:
+                novel = ctx.novel_repository.get_by_id(ctx.novel_id)
+                if novel:
+                    level = getattr(novel, "auto_ai_level", None)
+                    if level:
+                        auto_level = level if isinstance(level, AutoAILevel) else AutoAILevel(str(level))
+            except Exception:
+                pass
+
+        if auto_level == AutoAILevel.CONSERVATIVE:
+            return
+
+        high_violations = [
+            v for v in (report.all_violations or [])
+            if isinstance(v, dict) and v.get("severity") in ("high", "critical")
+            or hasattr(v, "severity") and getattr(v, "severity", "") in ("high", "critical")
+        ]
+        if not high_violations:
+            return
+
+        logger.info(
+            "[%s] 自动修复 %d 个高严重度违规 (level=%s)",
+            ctx.novel_id, len(high_violations), auto_level.value,
+        )
+
+        for attempt in range(2):
+            violation_summaries = []
+            for v in high_violations[:5]:  # 最多处理 5 个
+                if isinstance(v, dict):
+                    violation_summaries.append(
+                        f"- [{v.get('dimension', '?')}] {v.get('description', str(v))}"
+                    )
+                else:
+                    violation_summaries.append(f"- {str(v)}")
+
+            try:
+                from application.ai_invocation.autopilot.factory import get_or_create_autopilot_helper_invoker
+                from application.ai_invocation.autopilot.helper_invoker import AutopilotHelperRequest
+
+                host = ctx.get_dep("autopilot_host")
+                if not host or not ctx.llm_service:
+                    return
+
+                helper = get_or_create_autopilot_helper_invoker(host, llm_service=ctx.llm_service)
+                fixed_text = await helper.invoke_text(
+                    AutopilotHelperRequest(
+                        novel_id=str(ctx.novel_id),
+                        stage="writing",
+                        operation="autopilot.content.fix",
+                        node_key="content-auto-fix",
+                        explicit_variables={
+                            "content": ctx.chapter_content[:8000],
+                            "violations": "\n".join(violation_summaries),
+                            "chapter_outline": ctx.outline or "无单独大纲",
+                        },
+                        context={
+                            "novel_id": str(ctx.novel_id),
+                            "chapter_number": ctx.chapter_number,
+                        },
+                        metadata={"source": "story_pipeline.auto_fix"},
+                        config={"max_tokens": 8192, "temperature": 0.4},
+                    )
+                )
+                if fixed_text and len(fixed_text) > 100:
+                    ctx.chapter_content = fixed_text.strip()
+                    ctx.word_count = len(fixed_text.strip())
+                    logger.info("[%s] 自动修复完成 (attempt=%d)", ctx.novel_id, attempt + 1)
+                    # 修复后不再继续循环，由下一轮 validate 自然覆盖
+                    break
+            except Exception as e:
+                logger.warning("[%s] 自动修复失败 (attempt=%d): %s", ctx.novel_id, attempt, e)
+                break
 
     async def _score_tension_via_llm(self, ctx: PipelineContext) -> Optional[int]:
         """通过 AI Invocation 评分。

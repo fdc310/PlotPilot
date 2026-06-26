@@ -220,33 +220,30 @@ class ChapterAftermathPipeline:
             logger.debug("aftermath 跳过：正文为空 novel=%s ch=%s", novel_id, chapter_number)
             return out
 
-        # 0) 章间衔接锚点。放在统一章后管线里，确保 HTTP 保存、托管连写、
-        # 自动驾驶最终都会产出同一种前章桥段资产。
-        try:
+        # 并行化独立的章后分析阶段：
+        # Stage 0 (bridge_extract), Stage 1 (narrative_sync), Stage 1b (character_reconcile)
+        # 互相无数据依赖，可并行执行
+
+        async def _run_bridge_extract():
             await _timed_aftermath_stage(
                 "bridge_extract",
                 novel_id,
                 chapter_number,
                 lambda: self._extract_chapter_bridge(novel_id, chapter_number, content),
             )
-            out["bridge_extracted"] = True
-        except Exception as e:
-            logger.warning("章节桥段提取失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+            return True
 
-        # 1) 叙事 + 向量 + 故事线 + 张力 + 对话 + 因果边 + 人物状态 + 债务
-        try:
+        async def _run_narrative_sync():
             from application.world.services.chapter_narrative_sync import (
                 sync_chapter_narrative_after_save,
             )
-
-            async def _sync_narrative() -> Dict[str, Any]:
-                return await sync_chapter_narrative_after_save(
-                    novel_id,
-                    chapter_number,
-                    content,
-                    self._knowledge,
-                    self._indexing,
-                    self._llm,
+            return await _timed_aftermath_stage(
+                "narrative_sync",
+                novel_id,
+                chapter_number,
+                lambda: sync_chapter_narrative_after_save(
+                    novel_id, chapter_number, content,
+                    self._knowledge, self._indexing, self._llm,
                     triple_repository=self._triple_repository,
                     foreshadowing_repo=self._foreshadowing_repository,
                     storyline_repository=self._storyline_repository,
@@ -258,14 +255,31 @@ class ChapterAftermathPipeline:
                     debt_repository=self._debt_repository,
                     bible_repository=self._bible_repository,
                     chapter_micro_beats=chapter_micro_beats,
-                )
-
-            sync_flags = await _timed_aftermath_stage(
-                "narrative_sync",
-                novel_id,
-                chapter_number,
-                _sync_narrative,
+                ),
             )
+
+        async def _run_character_reconcile():
+            if self._character_kernel:
+                return self._character_kernel.reconcile_after_chapter(
+                    novel_id, chapter_number, content, None,
+                )
+            return None
+
+        # 三个独立阶段并行执行
+        bridge_task = asyncio.create_task(_run_bridge_extract())
+        sync_task = asyncio.create_task(_run_narrative_sync())
+        reconcile_task = asyncio.create_task(_run_character_reconcile())
+
+        # 收集 bridge 结果
+        try:
+            await bridge_task
+            out["bridge_extracted"] = True
+        except Exception as e:
+            logger.warning("章节桥段提取失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+
+        # 收集 narrative_sync 结果
+        try:
+            sync_flags = await sync_task
             out["narrative_sync_ok"] = True
             out["vector_stored"] = bool(sync_flags.get("vector_stored"))
             out["foreshadow_stored"] = bool(sync_flags.get("foreshadow_stored"))
@@ -273,22 +287,16 @@ class ChapterAftermathPipeline:
             out["causal_edges_stored"] = bool(sync_flags.get("causal_edges_stored"))
             out["character_mutations_stored"] = bool(sync_flags.get("character_mutations_stored"))
             out["debt_updated"] = bool(sync_flags.get("debt_updated"))
-            # 传递多维张力评分（0-100），供审计流程替代旧式 _score_tension
             out["tension_composite"] = sync_flags.get("tension_composite")
         except Exception as e:
             logger.warning(
                 "叙事同步/向量失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
             )
 
-        # 1b) 角色叙事内核对账：cast plan vs 正文，自动投影状态与风险。
+        # 收集 character_reconcile 结果
         try:
-            if self._character_kernel:
-                reconcile = self._character_kernel.reconcile_after_chapter(
-                    novel_id,
-                    chapter_number,
-                    content,
-                    None,
-                )
+            reconcile = await reconcile_task
+            if reconcile:
                 out["character_reconcile_ok"] = bool(reconcile.get("checked"))
                 out["character_reconcile"] = reconcile
         except Exception as e:

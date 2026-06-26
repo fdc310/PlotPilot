@@ -195,7 +195,7 @@ class LLMControlService:
                 protocol='openai',
                 default_base_url='',
                 default_model='',
-                description='适用于所有 OpenAI-compatible 网关：OpenAI、DeepSeek、Qwen、GLM、豆包、SiliconFlow、OpenRouter 等。',
+                description='适用于所有 OpenAI-compatible 网关：OpenAI、DeepSeek、Qwen、GLM、豆包、SiliconFlow、Moonshot、MiniMax、百度千帆、零一万物、OpenRouter 等。',
                 tags=['custom', 'openai-compatible', 'domestic'],
             ),
             LLMPreset(
@@ -268,6 +268,51 @@ class LLMControlService:
                 default_base_url='https://ark.cn-beijing.volces.com/api/v3',
                 default_model='',
                 description='方舟 OpenAI-compatible 接口；模型名以方舟控制台 Endpoint 为准。',
+                tags=['domestic', 'preset'],
+            ),
+            LLMPreset(
+                key='minimax',
+                label='MiniMax / 海螺AI（含小米 MiMo）',
+                protocol='openai',
+                default_base_url='https://api.minimax.chat/v1',
+                default_model='',
+                description='MiniMax OpenAI-compatible 接口。小米 MiMo 系列模型也使用此接口。模型名以控制台为准。',
+                tags=['domestic', 'preset'],
+            ),
+            LLMPreset(
+                key='siliconflow',
+                label='SiliconFlow 硅基流动',
+                protocol='openai',
+                default_base_url='https://api.siliconflow.cn/v1',
+                default_model='',
+                description='SiliconFlow 聚合网关，支持 DeepSeek/Qwen/GLM/LLaMA 等多种开源模型。模型名以平台文档为准。',
+                tags=['domestic', 'preset'],
+            ),
+            LLMPreset(
+                key='moonshot',
+                label='Moonshot / Kimi',
+                protocol='openai',
+                default_base_url='https://api.moonshot.cn/v1',
+                default_model='',
+                description='月之暗面 Moonshot OpenAI-compatible 接口。模型名以官方文档为准（moonshot-v1-128k 等）。',
+                tags=['domestic', 'preset'],
+            ),
+            LLMPreset(
+                key='qianfan',
+                label='百度千帆 / 文心一言',
+                protocol='openai',
+                default_base_url='https://qianfan.baidubce.com/v2',
+                default_model='',
+                description='百度千帆 OpenAI-compatible 接口（V2）。模型名以千帆控制台为准。',
+                tags=['domestic', 'preset'],
+            ),
+            LLMPreset(
+                key='yi',
+                label='零一万物 Yi',
+                protocol='openai',
+                default_base_url='https://api.lingyiwanwu.com/v1',
+                default_model='',
+                description='零一万物 Yi 系列 OpenAI-compatible 接口。模型名以官方文档为准。',
                 tags=['domestic', 'preset'],
             ),
         ]
@@ -607,6 +652,26 @@ class LLMControlService:
                 'model': env.ark_model,
             })
             active_profile_id = profiles[0].id
+        else:
+            # 检查国产厂商环境变量 (DeepSeek / MiniMax / SiliconFlow / Moonshot / Qianfan / Yi)
+            preset_key, domestic_key, domestic_url, domestic_model = env.resolve_provider_env()
+            if domestic_key:
+                label_map = {
+                    'deepseek': 'DeepSeek',
+                    'minimax': 'MiniMax / 海螺AI',
+                    'siliconflow': 'SiliconFlow 硅基流动',
+                    'moonshot': 'Moonshot / Kimi',
+                    'qianfan': '百度千帆',
+                    'yi': '零一万物 Yi',
+                }
+                profiles[0] = profiles[0].model_copy(update={
+                    'name': label_map.get(preset_key, preset_key),
+                    'preset_key': preset_key,
+                    'api_key': domestic_key,
+                    'base_url': domestic_url,
+                    'model': domestic_model,
+                })
+                active_profile_id = profiles[0].id
 
         return LLMControlConfig(
             version=1,

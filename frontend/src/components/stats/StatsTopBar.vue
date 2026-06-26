@@ -86,6 +86,7 @@ import { computed, onMounted, ref } from 'vue'
 import { NTooltip, NSpin, NDropdown, NButton, useMessage } from 'naive-ui'
 import { useStatsStore } from '@/stores/statsStore'
 import { novelApi } from '@/api/novel'
+import { useRouter } from 'vue-router'
 import GlobalLLMEntryButton from '@/components/global/GlobalLLMEntryButton.vue'
 import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.vue'
 
@@ -98,6 +99,7 @@ defineEmits<{
 }>()
 
 const message = useMessage()
+const router = useRouter()
 
 // AI 工具组件引用（用于以编程方式触发各组件内部按钮）
 const llmRef = ref<{ $el: HTMLElement } | null>(null)
@@ -121,10 +123,21 @@ const exportOptions = [
   { label: '📱 EPUB (电子书)', key: 'epub' },
   { label: '📄 PDF (打印)', key: 'pdf' },
   { label: '📝 DOCX (Word)', key: 'docx' },
-  { label: '📋 Markdown', key: 'markdown' }
+  { label: '📋 Markdown', key: 'markdown' },
+  { type: 'divider', key: 'd1' },
+  { label: '🎵 有声书 (TTS)', key: 'tts' },
+  { label: '📤 一键投稿', key: 'publish' },
 ]
 
 async function handleExport(format: string) {
+  if (format === 'tts') {
+    router.push(`/book/${props.slug}/tts`)
+    return
+  }
+  if (format === 'publish') {
+    router.push(`/book/${props.slug}/publish`)
+    return
+  }
   try {
     message.info(`开始导出为 ${format} 格式...`)
     const blob = await novelApi.exportNovel(props.slug, format)

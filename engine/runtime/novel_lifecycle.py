@@ -4,13 +4,34 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from domain.novel.entities.novel import Novel, NovelStage, AutopilotStatus
+from domain.novel.entities.novel import Novel, NovelStage, AutopilotStatus, AutoAILevel
 
 from engine.runtime.act_planning_delegate import run_act_planning
 from engine.runtime.audit_delegate import run_chapter_audit
 from engine.runtime.macro_planning_delegate import run_macro_planning
 
 logger = logging.getLogger(__name__)
+
+
+def _check_bible_exists(host: Any, novel: Novel) -> bool:
+    """检查该小说是否已有世界观数据（Bible worldbuilding 或 locations）。"""
+    try:
+        from application.world.services.narrative_contract_loader import load_merged_worldbuilding_slices
+        slices = load_merged_worldbuilding_slices(str(novel.novel_id))
+        if slices and any(v for v in slices.values() if v):
+            return True
+    except Exception:
+        pass
+    # 回退：检查 BibleService 里是否有角色
+    try:
+        bible_repo = getattr(host, "bible_repository", None)
+        if bible_repo:
+            bible = bible_repo.get_by_novel_id(str(novel.novel_id))
+            if bible and (bible.characters or bible.world_settings or bible.locations):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _is_novel_deleted(host: Any, novel: Novel) -> bool:
@@ -82,8 +103,25 @@ async def process_novel(host: Any, novel: Novel) -> None:
         stage_name = novel.current_stage.value
         logger.debug("[%s] 当前阶段: %s", novel.novel_id, stage_name)
 
-        if novel.current_stage in (NovelStage.PLANNING, NovelStage.MACRO_PLANNING):
+        if novel.current_stage == NovelStage.BIBLE_GENERATION:
+            logger.info("[%s] 开始 AI 自动生成世界观/角色/地点", novel.novel_id)
+            from engine.runtime.bible_delegate import run_bible_generation
+            await run_bible_generation(host, novel)
+        elif novel.current_stage in (NovelStage.PLANNING, NovelStage.MACRO_PLANNING):
+            # 检查 Bible 是否已生成，未生成则先走 Bible 阶段
             if novel.current_stage == NovelStage.PLANNING:
+                auto_level = getattr(novel, "auto_ai_level", AutoAILevel.CONSERVATIVE)
+                if isinstance(auto_level, str):
+                    auto_level = AutoAILevel(auto_level)
+                if auto_level in (AutoAILevel.BALANCED, AutoAILevel.AGGRESSIVE):
+                    has_bible = _check_bible_exists(host, novel)
+                    if not has_bible:
+                        logger.info("[%s] Bible 尚未生成，自动进入 bible_generation 阶段", novel.novel_id)
+                        novel.current_stage = NovelStage.BIBLE_GENERATION
+                        host._save_novel_state(novel)
+                        from engine.runtime.bible_delegate import run_bible_generation
+                        await run_bible_generation(host, novel)
+                        return
                 logger.info("[%s] 旧版 planning 阶段归一为 macro_planning", novel.novel_id)
                 novel.current_stage = NovelStage.MACRO_PLANNING
                 try:
@@ -104,8 +142,11 @@ async def process_novel(host: Any, novel: Novel) -> None:
             logger.info("[%s] 开始审计", novel.novel_id)
             await run_chapter_audit(host, novel)
         elif novel.current_stage == NovelStage.PAUSED_FOR_REVIEW:
-            if getattr(novel, "auto_approve_mode", False):
-                logger.info("[%s] 全自动模式：跳过人工审阅", novel.novel_id)
+            auto_level = getattr(novel, "auto_ai_level", AutoAILevel.CONSERVATIVE)
+            if isinstance(auto_level, str):
+                auto_level = AutoAILevel(auto_level)
+            if getattr(novel, "auto_approve_mode", False) or auto_level in (AutoAILevel.BALANCED, AutoAILevel.AGGRESSIVE):
+                logger.info("[%s] 自动模式 (level=%s)：跳过人工审阅", novel.novel_id, auto_level.value)
                 novel.current_stage = NovelStage.ACT_PLANNING
                 host._save_novel_state(novel)
                 return

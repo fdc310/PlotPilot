@@ -60,6 +60,20 @@
               :maxlength="PREMISE_MAX_LEN"
             />
 
+            <!-- AI 一键生成按钮 -->
+            <div class="ai-generate-bar">
+              <n-button
+                type="primary"
+                ghost
+                :loading="aiGenerating"
+                :disabled="!newBook.premise.trim() || creating"
+                @click="handleAIGenerate"
+              >
+                ✨ AI 一键生成全部配置
+              </n-button>
+              <span class="ai-generate-hint">输入创意后点击，自动生成类型、世界观、结构、节奏、风格等全部字段</span>
+            </div>
+
             <div class="taxonomy-block">
               <div class="taxonomy-block-head">
                 <span class="taxonomy-block-title">市场分区</span>
@@ -417,6 +431,7 @@ import { defineAsyncComponent, h, ref, onMounted, computed, nextTick } from 'vue
 import { useRouter } from 'vue-router'
 import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
+import { premiseApi } from '../api/premise'
 import { isWizardCompleted } from '@/utils/wizardStageCache'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import { useAppSettingsShellStore } from '@/stores/appSettingsShellStore'
@@ -486,6 +501,7 @@ const appSettingsShell = useAppSettingsShellStore()
 const createInputRef = ref<any>(null)
 const showAdvanced = ref(false)
 const creating = ref(false)
+const aiGenerating = ref(false)
 const loading = ref(false)
 
 const sidebarCollapsed = ref(readStorageBoolean(storageKeys.statsSidebarCollapsed))
@@ -600,6 +616,37 @@ const formatWordCount = (count: number): string => {
     return (count / 10000).toFixed(1) + '万字'
   }
   return count + '字'
+}
+
+const handleAIGenerate = async () => {
+  if (!newBook.value.premise.trim()) {
+    message.warning('请先输入故事创意')
+    return
+  }
+  aiGenerating.value = true
+  try {
+    const res = await premiseApi.generate({
+      premise: newBook.value.premise.trim(),
+      genre_hint: newBook.value.genre || '',
+    })
+    const data = res.data
+    // 填充所有字段
+    if (data.title) newBook.value.title = data.title
+    if (data.genre) newBook.value.genre = data.genre
+    if (data.world_preset) newBook.value.worldPreset = data.world_preset
+    if (data.story_structure) newBook.value.storyStructure = data.story_structure
+    if (data.pacing_control) newBook.value.pacingControl = data.pacing_control
+    if (data.writing_style) newBook.value.writingStyle = data.writing_style
+    if (data.special_requirements) newBook.value.specialRequirements = data.special_requirements
+    if (data.suggested_chapters) newBook.value.chapters = data.suggested_chapters
+    if (data.suggested_words_per_chapter) newBook.value.words = data.suggested_words_per_chapter
+    message.success('✨ AI 已生成全部配置，请检查后建档')
+  } catch (err: any) {
+    const detail = err?.response?.data?.detail || err?.message || '生成失败'
+    message.error(`AI 生成失败：${detail}`)
+  } finally {
+    aiGenerating.value = false
+  }
 }
 
 const handleCreate = async () => {
@@ -889,6 +936,18 @@ onMounted(() => {
 .premise-input :deep(textarea) {
   font-size: 15px;
   line-height: 1.6;
+}
+
+.ai-generate-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.ai-generate-hint {
+  font-size: 12px;
+  color: var(--app-text-muted, #9ca3af);
 }
 
 .taxonomy-block {

@@ -30,6 +30,7 @@ class AutopilotDaemon(DaemonHostMixin):
         story_node_repo,
         chapter_repository,
         poll_interval: int = 5,
+        max_concurrent_novels: int = 3,
         voice_drift_service=None,
         circuit_breaker=None,
         chapter_workflow: Optional[AutoNovelGenerationWorkflow] = None,
@@ -57,6 +58,7 @@ class AutopilotDaemon(DaemonHostMixin):
             story_node_repo=story_node_repo,
             chapter_repository=chapter_repository,
             poll_interval=poll_interval,
+            max_concurrent_novels=max_concurrent_novels,
             voice_drift_service=voice_drift_service,
             circuit_breaker=circuit_breaker,
             chapter_workflow=chapter_workflow,
@@ -81,6 +83,11 @@ class AutopilotDaemon(DaemonHostMixin):
         from engine.runtime.novel_lifecycle import process_novel
 
         await process_novel(self, novel)
+
+    async def _handle_bible_generation(self, novel: Novel) -> None:
+        from engine.runtime.bible_delegate import run_bible_generation
+
+        await run_bible_generation(self, novel)
 
     async def _handle_macro_planning(self, novel: Novel) -> None:
         from engine.runtime.macro_planning_delegate import run_macro_planning

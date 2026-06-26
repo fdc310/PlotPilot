@@ -12,6 +12,7 @@ from domain.shared.exceptions import InvalidOperationError
 class NovelStage(str, Enum):
     """小说阶段（细化为自动驾驶状态机）"""
     PLANNING = "planning"  # 旧版兼容
+    BIBLE_GENERATION = "bible_generation"  # AI 自动生成世界观/角色/地点
     MACRO_PLANNING = "macro_planning"  # 规划部/卷/幕
     ACT_PLANNING = "act_planning"  # 规划当前幕的章节（插入缓冲章）
     WRITING = "writing"  # 写正文（节拍放大器）
@@ -28,6 +29,13 @@ class AutopilotStatus(str, Enum):
     ERROR = "error"  # 遇到阻断性错误，挂起等待急救
 
 
+class AutoAILevel(str, Enum):
+    """AI 自动化程度"""
+    CONSERVATIVE = "conservative"  # 保守：仅 aftermath/audit 自动通过，其余暂停等人工
+    BALANCED = "balanced"  # 平衡：规划/审计自动通过，章节生成可选审核
+    AGGRESSIVE = "aggressive"  # 激进：全部自动通过，最大化 AI 自主性
+
+
 class Novel(BaseEntity):
     """小说聚合根"""
 
@@ -41,6 +49,7 @@ class Novel(BaseEntity):
         stage: NovelStage = NovelStage.PLANNING,
         autopilot_status: AutopilotStatus = AutopilotStatus.STOPPED,
         auto_approve_mode: bool = False,
+        auto_ai_level: str = "conservative",
         current_stage: NovelStage = NovelStage.PLANNING,
         current_act: int = 0,
         current_chapter_in_act: int = 0,
@@ -83,6 +92,7 @@ class Novel(BaseEntity):
         # 自动驾驶状态
         self.autopilot_status = autopilot_status
         self.auto_approve_mode = auto_approve_mode  # 全自动模式：跳过所有人工审阅
+        self.auto_ai_level = AutoAILevel(auto_ai_level) if isinstance(auto_ai_level, str) else auto_ai_level
         self.current_stage = current_stage
         self.current_act = current_act
         self.current_chapter_in_act = current_chapter_in_act

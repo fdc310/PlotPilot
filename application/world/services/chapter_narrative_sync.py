@@ -2198,62 +2198,73 @@ async def sync_chapter_narrative_after_save(
             logger.warning("获取待回收伏笔失败: %s", e)
 
     try:
-        bundle = await llm_chapter_extract_bundle(
-            llm_service, content, chapter_number,
-            pending_foreshadows=pending_foreshadow_descs if pending_foreshadow_descs else None
-        )
-        summary = bundle.get("summary") or ""
-        key_events = bundle.get("key_events") or ""
-        open_threads = bundle.get("open_threads") or ""
-    except Exception as e:
-        logger.warning("LLM 章末 bundle 失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
-        summary, key_events, open_threads = "", "", ""
-        bundle = {"relation_triples": [], "foreshadow_hints": []}
-
-    # --- 独立多维张力评分 ---
-    from application.analyst.services.tension_scoring_service import TensionScoringService
-    from domain.novel.value_objects.tension_dimensions import TensionDimensions, UNEVALUATED
-
-    tension_dimensions: Optional[TensionDimensions] = None
-    try:
-        prev_tension = 50.0
-        if chapter_repository:
-            try:
-                # 🔥 性能优化：用轻量 SQL 查询替代 list_by_novel
-                # 原来加载所有章节内容（可能几百 KB），现在只查一个值
-                db = chapter_repository.db if hasattr(chapter_repository, 'db') else None
-                if db is not None:
-                    row = db.fetch_one(
-                        "SELECT tension_score FROM chapters WHERE novel_id = ? AND number = ?",
-                        (novel_id, chapter_number - 1)
-                    )
-                    if row and row['tension_score'] is not None and row['tension_score'] != -1:
-                        prev_tension = float(row['tension_score'])
-                else:
-                    # 降级：用原方法
-                    chapters = chapter_repository.list_by_novel(NovelId(novel_id))
-                    prev_ch = next((ch for ch in chapters if ch.number == chapter_number - 1), None)
-                    if prev_ch:
-                        prev_tension = prev_ch.tension_score
-            except Exception:
-                pass
-
+        # 并行化两个独立 LLM 调用：bundle 提取 + 张力评分
+        from application.analyst.services.tension_scoring_service import TensionScoringService
         tension_svc = TensionScoringService(llm_service)
-        tension_dimensions = await tension_svc.score_chapter(
-            chapter_content=content,
-            chapter_number=chapter_number,
-            prev_chapter_tension=prev_tension,
+
+        async def _extract_bundle_task():
+            return await llm_chapter_extract_bundle(
+                llm_service, content, chapter_number,
+                pending_foreshadows=pending_foreshadow_descs if pending_foreshadow_descs else None
+            )
+
+        async def _score_tension_task():
+            prev_tension = 50.0
+            if chapter_repository:
+                try:
+                    db = chapter_repository.db if hasattr(chapter_repository, 'db') else None
+                    if db is not None:
+                        row = db.fetch_one(
+                            "SELECT tension_score FROM chapters WHERE novel_id = ? AND number = ?",
+                            (novel_id, chapter_number - 1)
+                        )
+                        if row and row['tension_score'] is not None and row['tension_score'] != -1:
+                            prev_tension = float(row['tension_score'])
+                    else:
+                        chapters = chapter_repository.list_by_novel(NovelId(novel_id))
+                        prev_ch = next((ch for ch in chapters if ch.number == chapter_number - 1), None)
+                        if prev_ch:
+                            prev_tension = prev_ch.tension_score
+                except Exception:
+                    pass
+            return await tension_svc.score_chapter(
+                chapter_content=content,
+                chapter_number=chapter_number,
+                prev_chapter_tension=prev_tension,
+            )
+
+        bundle_result, tension_result = await asyncio.gather(
+            _extract_bundle_task(), _score_tension_task(),
+            return_exceptions=True,
         )
-        logger.info(
-            "独立张力评分完成 novel=%s ch=%s composite=%.1f plot=%.0f emotional=%.0f pacing=%.0f",
-            novel_id, chapter_number,
-            tension_dimensions.composite_score,
-            tension_dimensions.plot_tension,
-            tension_dimensions.emotional_tension,
-            tension_dimensions.pacing_tension,
-        )
-    except Exception as e:
-        logger.warning("独立张力评分失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+
+        # 处理 bundle 提取结果
+        if isinstance(bundle_result, Exception):
+            logger.warning("LLM 章末 bundle 失败 novel=%s ch=%s: %s", novel_id, chapter_number, bundle_result)
+            summary, key_events, open_threads = "", "", ""
+            bundle = {"relation_triples": [], "foreshadow_hints": []}
+        else:
+            bundle = bundle_result
+            summary = bundle.get("summary") or ""
+            key_events = bundle.get("key_events") or ""
+            open_threads = bundle.get("open_threads") or ""
+
+        # 处理张力评分结果
+        from domain.novel.value_objects.tension_dimensions import TensionDimensions, UNEVALUATED
+
+        tension_dimensions: Optional[TensionDimensions] = None
+        if isinstance(tension_result, Exception):
+            logger.warning("独立张力评分失败 novel=%s ch=%s: %s", novel_id, chapter_number, tension_result)
+        else:
+            tension_dimensions = tension_result
+            logger.info(
+                "独立张力评分完成 novel=%s ch=%s composite=%.1f plot=%.0f emotional=%.0f pacing=%.0f",
+                novel_id, chapter_number,
+                tension_dimensions.composite_score,
+                tension_dimensions.plot_tension,
+                tension_dimensions.emotional_tension,
+                tension_dimensions.pacing_tension,
+            )
 
     # 将张力结果注入 bundle，供 persist_bundle_extras 使用
     if tension_dimensions is not None:
@@ -2306,95 +2317,94 @@ async def sync_chapter_narrative_after_save(
         sync_status="synced" if summary else "draft",
     )
 
-    if triple_repository is not None or foreshadowing_repo is not None:
-        try:
-            persist_bundle_triples_and_foreshadows(
-                novel_id,
-                chapter_number,
-                bundle,
-                triple_repository,
-                foreshadowing_repo,
-            )
-            if triple_repository is not None:
-                flags["triples_extracted"] = True
-            if foreshadowing_repo is not None:
-                flags["foreshadow_stored"] = True
-        except Exception as e:
-            logger.warning(
-                "bundle 三元组/伏笔落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
+    # 并行化独立的持久化操作（都只消费 bundle，互相无依赖）
+    async def _persist_triples_foreshadows():
+        if triple_repository is not None or foreshadowing_repo is not None:
+            try:
+                persist_bundle_triples_and_foreshadows(
+                    novel_id, chapter_number, bundle,
+                    triple_repository, foreshadowing_repo,
+                )
+                if triple_repository is not None:
+                    flags["triples_extracted"] = True
+                if foreshadowing_repo is not None:
+                    flags["foreshadow_stored"] = True
+            except Exception as e:
+                logger.warning("bundle 三元组/伏笔落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
-    if storyline_repository is not None or chapter_repository is not None or narrative_event_repository is not None:
-        try:
-            persist_bundle_extras(
-                novel_id,
-                chapter_number,
-                bundle,
-                storyline_repository,
-                chapter_repository,
-                plot_arc_repository,
-                narrative_event_repository,
-            )
-        except Exception as e:
-            logger.warning(
-                "bundle 故事线/张力/对话落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
+    async def _persist_storyline_extras():
+        if storyline_repository is not None or chapter_repository is not None or narrative_event_repository is not None:
+            try:
+                persist_bundle_extras(
+                    novel_id, chapter_number, bundle,
+                    storyline_repository, chapter_repository,
+                    plot_arc_repository, narrative_event_repository,
+                )
+            except Exception as e:
+                logger.warning("bundle 故事线/张力/对话落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
-    # ★ V8 Feed-forward: 因果边提取 + 人物状态突变 + 叙事债务更新
-    if causal_edge_repository is not None:
-        try:
-            saved_edges = persist_causal_edges(
-                novel_id, chapter_number, bundle, causal_edge_repository
-            )
-            if saved_edges > 0:
-                flags["causal_edges_stored"] = True
-        except Exception as e:
-            logger.warning(
-                "因果边落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
+    async def _persist_causal():
+        if causal_edge_repository is not None:
+            try:
+                saved_edges = persist_causal_edges(
+                    novel_id, chapter_number, bundle, causal_edge_repository
+                )
+                if saved_edges > 0:
+                    flags["causal_edges_stored"] = True
+            except Exception as e:
+                logger.warning("因果边落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
-    if character_state_repository is not None:
-        try:
-            saved_mutations = persist_character_mutations(
-                novel_id, chapter_number, bundle, character_state_repository, bible_repository
-            )
-            if saved_mutations > 0:
-                flags["character_mutations_stored"] = True
-        except Exception as e:
-            logger.warning(
-                "人物状态突变落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
-        try:
-            persist_character_end_states(
-                novel_id, chapter_number, bundle, character_state_repository, bible_repository
-            )
-        except Exception as e:
-            logger.warning(
-                "章末人物状态落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
+    async def _persist_character_states():
+        if character_state_repository is not None:
+            try:
+                saved_mutations = persist_character_mutations(
+                    novel_id, chapter_number, bundle,
+                    character_state_repository, bible_repository,
+                )
+                if saved_mutations > 0:
+                    flags["character_mutations_stored"] = True
+            except Exception as e:
+                logger.warning("人物状态突变落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+            try:
+                persist_character_end_states(
+                    novel_id, chapter_number, bundle,
+                    character_state_repository, bible_repository,
+                )
+            except Exception as e:
+                logger.warning("章末人物状态落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
-    try:
-        memory_saved = persist_bundle_memory_atoms(
-            novel_id, chapter_number, bundle, bible_repository
-        )
-        if memory_saved > 0:
-            flags["memory_atoms_stored"] = True
-    except Exception as e:
-        logger.warning(
-            "MemoryAtom 双写失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-        )
-
-    if debt_repository is not None:
+    async def _persist_memory_atoms():
         try:
-            new_debts = update_narrative_debts(
-                novel_id, chapter_number, bundle, debt_repository, causal_edge_repository
+            memory_saved = persist_bundle_memory_atoms(
+                novel_id, chapter_number, bundle, bible_repository
             )
-            if new_debts >= 0:  # 0 也算成功（可能没有新债务）
-                flags["debt_updated"] = True
+            if memory_saved > 0:
+                flags["memory_atoms_stored"] = True
         except Exception as e:
-            logger.warning(
-                "叙事债务更新失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
-            )
+            logger.warning("MemoryAtom 双写失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+
+    async def _persist_debt():
+        if debt_repository is not None:
+            try:
+                new_debts = update_narrative_debts(
+                    novel_id, chapter_number, bundle,
+                    debt_repository, causal_edge_repository,
+                )
+                if new_debts >= 0:
+                    flags["debt_updated"] = True
+            except Exception as e:
+                logger.warning("叙事债务更新失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+
+    # 并行执行所有独立的持久化操作（DB 写入通过 write_dispatch 串行化，但数据准备可并行）
+    await asyncio.gather(
+        _persist_triples_foreshadows(),
+        _persist_storyline_extras(),
+        _persist_causal(),
+        _persist_character_states(),
+        _persist_memory_atoms(),
+        _persist_debt(),
+        return_exceptions=False,
+    )
 
     logger.info(
         "分章叙事已落库 novel=%s ch=%s beats=%d(src=planning/knowledge) summary_len=%d",

@@ -61,6 +61,7 @@ def init_daemon_dependencies(
     story_node_repo,
     chapter_repository,
     poll_interval: int = 5,
+    max_concurrent_novels: int = 3,
     voice_drift_service=None,
     circuit_breaker=None,
     chapter_workflow=None,
@@ -83,6 +84,7 @@ def init_daemon_dependencies(
     host.story_node_repo = story_node_repo
     host.chapter_repository = chapter_repository
     host.poll_interval = poll_interval
+    host.max_concurrent_novels = max(1, max_concurrent_novels)
     host.voice_drift_service = voice_drift_service
     host.circuit_breaker = circuit_breaker
     host.chapter_workflow = chapter_workflow

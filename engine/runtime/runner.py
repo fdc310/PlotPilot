@@ -30,6 +30,7 @@ class StoryPipelineRunner(DaemonHostMixin, BaseStoryPipeline):
         story_node_repo=None,
         chapter_repository=None,
         poll_interval: int = 5,
+        max_concurrent_novels: int = 3,
         voice_drift_service=None,
         circuit_breaker=None,
         chapter_workflow=None,
@@ -50,6 +51,7 @@ class StoryPipelineRunner(DaemonHostMixin, BaseStoryPipeline):
             story_node_repo=story_node_repo,
             chapter_repository=chapter_repository,
             poll_interval=poll_interval,
+            max_concurrent_novels=max_concurrent_novels,
             voice_drift_service=voice_drift_service,
             circuit_breaker=circuit_breaker,
             chapter_workflow=chapter_workflow,
@@ -120,6 +122,7 @@ class StoryPipelineRunner(DaemonHostMixin, BaseStoryPipeline):
 
         banner = (
             f"StoryPipelineRunner Started | poll={self.poll_interval}s | "
+            f"max_concurrent={self.max_concurrent_novels} | "
             f"circuit_breaker={'on' if self.circuit_breaker else 'off'} | "
             f"story_pipeline={'on' if self.use_story_pipeline_for_writing else 'off'}"
         )
@@ -129,6 +132,11 @@ class StoryPipelineRunner(DaemonHostMixin, BaseStoryPipeline):
         from engine.runtime.novel_lifecycle import process_novel
 
         await process_novel(self.host, novel)
+
+    async def _handle_bible_generation(self, novel: Any) -> None:
+        from engine.runtime.bible_delegate import run_bible_generation
+
+        await run_bible_generation(self.host, novel)
 
     async def _handle_macro_planning(self, novel: Any) -> None:
         from engine.runtime.macro_planning_delegate import run_macro_planning
@@ -155,6 +163,7 @@ class StoryPipelineRunner(DaemonHostMixin, BaseStoryPipeline):
             stage = getattr(novel, "current_stage", None)
             stage_value = stage.value if hasattr(stage, "value") else str(stage)
             phase_map = {
+                "bible_generation": "opening",
                 "macro_planning": "opening",
                 "act_planning": "opening",
                 "writing": "development",
